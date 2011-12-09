@@ -1,4 +1,4 @@
-package main
+package storage
 
 import (
   "os"
@@ -12,7 +12,7 @@ type HashingStorage struct {
   storageBuckets []Storage
 }
 
-func newHashingStorage(size uint32) *HashingStorage {
+func NewHashingStorage(size uint32) *HashingStorage {
   s := &HashingStorage{size, hornerHasher, make([]Storage, size)}
    
   for i := uint32(0); i < size; i++  {

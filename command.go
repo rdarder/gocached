@@ -9,6 +9,7 @@ import (
   "regexp"
   "time"
   "fmt"
+  "storage"
 )
 
 var spaceMatcher, _ = regexp.Compile("  *")
@@ -16,7 +17,7 @@ var spaceMatcher, _ = regexp.Compile("  *")
 type Session struct {
   conn      *net.TCPConn
   bufreader *bufio.Reader
-  storage Storage
+  storage storage.Storage
 }
 
 type Command interface {
@@ -55,7 +56,7 @@ type ErrCommand struct {
 }
 
 func NewSession(conn *net.TCPConn) (*Session, os.Error) {
-  var s = &Session{conn, bufio.NewReader(conn), newHashingStorage(100)}
+  var s = &Session{conn, bufio.NewReader(conn), storage.NewHashingStorage(100)}
   return s, nil
 }
 
