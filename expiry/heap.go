@@ -5,14 +5,14 @@ package expiry
 //The invariant is:
 // Each entry in the storage map has at least one entry with the same key and ttl in the queue, or it's in the expiry channel buffer. This holds for the 'current' entry value at any given time, including updates
 
-type Entry struct {
-	Exptime uint32
+type HeapEntry struct {
 	Key     *string
+	Exptime uint32
 }
 
-// The heap is implemented in an array, hence the type is an alias of Entry slice.
+// The heap is implemented in an array, hence the type is an alias of HeapEntry slice.
 // Note that as we want to support extensible heap capacities, functions like Push and Pop may change the underlying array (Push), or re-slice (Pop). In either case, we need a slice pointer, to be able to update it as a side-effect.
-type Heap []Entry
+type Heap []HeapEntry
 
 //make a heap of start_size and return its pointer
 func NewHeap(start_size int) *Heap {
@@ -40,7 +40,7 @@ func (h Heap) Swap(i, j int) {
 // heap.Interface Push implementation. Semantic is 'append'. 
 // Note that Push and Pop are implemented upon heap pointers, where Swap, Less and Len don't need pointers and are implemented on values. Recall 'the method set of the pointer type includes the method set of the value type'. May change the underlying array (and the slice)
 func (h *Heap) Push(ientry interface{}) {
-	entry := ientry.(Entry)
+	entry := ientry.(HeapEntry)
 	*h = append(*h, entry)
 }
 
@@ -50,4 +50,8 @@ func (h *Heap) Pop() interface{} {
 	ret := (*h)[last]
 	*h = (*h)[:last]
 	return ret
+}
+
+func (h Heap) Tip() HeapEntry {
+	return h[0]
 }
