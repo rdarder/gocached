@@ -145,10 +145,11 @@ func (self *MapStorage) Get(key string) (flags uint32, bytes uint32, cas_unique 
 	self.rwLock.RLock()
 	defer self.rwLock.RUnlock()
 	entry, present := self.storageMap[key]
-	if present && entry.exptime > now {
+	if present && (entry.exptime == 0 || entry.exptime > now) {
 		return entry.flags, entry.bytes, entry.cas_unique, entry.content, nil
-	}
-	return 0, 0, 0, nil, nil
+	} 
+  logger.Printf("Expired entry %+v at %v", entry, now)
+  return 0, 0, 0, nil, nil
 }
 
 func (self *MapStorage) MaybeExpire(key string, now uint32) bool {
@@ -156,7 +157,7 @@ func (self *MapStorage) MaybeExpire(key string, now uint32) bool {
 	entry, present := self.storageMap[key]
 	self.rwLock.RUnlock()
 	if present && entry.exptime <= now {
-		logger.Printf("expiring %+v at %v", entry, now)
+		logger.Printf("expiring key %v %+v at %v", key, entry, now)
 		self.rwLock.Lock()
 		self.storageMap[key] = mapStorageEntry{}, false
 		self.rwLock.Unlock()

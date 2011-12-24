@@ -21,10 +21,8 @@ func (ns NotifyStorage) ExpiringDaemon(freq int64) {
 	for timer := time.NewTicker(freq * 1000000); ; {
 		select {
 		case <-timer.C:
-			logger.Println("Collecting expired entries")
 			ns.Collect()
 		case entry := <-ns.bg:
-			logger.Println("Updating heap")
 			ns.Update(entry)
 		}
 	}
@@ -34,7 +32,6 @@ func (ns NotifyStorage) ExpiringDaemon(freq int64) {
 func (ns NotifyStorage) Update(entry expiry.HeapEntry) {
 	now := uint32(time.Seconds())
 	if entry.Exptime > now {
-		logger.Println("saving entry in heap")
 		heap.Push(ns.heap, entry)
 	}
 }
@@ -43,7 +40,6 @@ func (ns NotifyStorage) Collect() {
 	now := uint32(time.Seconds())
 	h := ns.heap
 	if h.Len() == 0 {
-		logger.Println("No elements in expiry heap")
 		return
 	}
 	logger.Printf("heap size: %v. heap: %v", h.Len(), *h)
@@ -69,7 +65,6 @@ func (ns *NotifyStorage) Init(daemon_freq int64) {
 func (self *NotifyStorage) Set(key string, flags uint32, exptime uint32, bytes uint32, content []byte) (err os.Error) {
 	err = self.MapStorage.Set(key, flags, exptime, bytes, content)
 	if err == nil {
-		logger.Println("sending to notify channel")
 		self.bg <- expiry.HeapEntry{&key, exptime}
 	}
 	return err

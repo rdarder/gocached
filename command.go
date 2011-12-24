@@ -35,6 +35,18 @@ type StorageCommand struct {
 	data       []byte
 }
 
+type CounterCommand struct {
+  key     string
+  incr    bool
+  noreply bool
+}
+
+type ErrCommand struct {
+	errtype int
+	errdesc string
+	os_err  os.Error
+}
+
 type RetrievalCommand struct {
 	command string
 	keys    []string
@@ -49,11 +61,6 @@ const (
 
 const secondsInMonth = 60 * 60 * 24 * 30
 
-type ErrCommand struct {
-	errtype int
-	errdesc string
-	os_err  os.Error
-}
 
 func NewSession(conn *net.TCPConn) *Session {
 	s := &Session{}
@@ -94,6 +101,11 @@ func (s *Session) NextCommand() (Command, os.Error) {
 		return command, nil
 	case "delete":
 	case "incr", "decr":
+    command := new(CounterCommand)
+    if err := command.parse(line); err != nil {
+			return &ErrCommand{ClientError, "bad command line format", err}, nil
+    }
+    return command, nil
 	case "touch":
 	case "stats":
 	case "flush_all":
@@ -140,7 +152,6 @@ func (sc *RetrievalCommand) parse(line []string) os.Error {
 
 func (self *RetrievalCommand) Exec(s *Session) os.Error {
 
-	logger.Printf("Retrieval: command: %s, keys: %s", self.command, self.keys)
 	showAll := self.command == "gets"
 	for i := 0; i < len(self.keys); i++ {
 		if flags, bytes, cas_unique, content, err := mainStorage.Get(self.keys[i]); err != nil {
@@ -216,10 +227,6 @@ func (sc *StorageCommand) readData(rd *bufio.Reader) os.Error {
 }
 
 func (sc *StorageCommand) Exec(s *Session) os.Error {
-	logger.Printf("Storage: key: %s, flags: %d, exptime: %d, "+
-		"bytes: %d, cas: %d, noreply: %t, content: %s\n",
-		sc.key, sc.flags, sc.exptime, sc.bytes,
-		sc.cas_unique, sc.noreply, string(sc.data))
 
 	switch sc.command {
 
@@ -265,3 +272,28 @@ func (sc *StorageCommand) Exec(s *Session) os.Error {
 	}
 	return nil
 }
+
+func (sc *CounterCommand) parse(line []string) os.Error {
+	if len(line) < 2 {
+		return os.NewError("Bad retrieval command: missing parameters")
+	}
+  if line[0] == "incr" {
+    sc.incr = true
+  } else if line[0] == "decr" {
+    sc.incr = false
+  } else {
+    return os.NewError("Wrong command, expected 'incr' or 'decr'")
+  }
+	sc.key = line[1]
+  if len(line) == 3 {
+    if line[2]  == "noreply" {
+      sc.noreply = true
+    } else {
+      return os.NewError("Wrong parameter, expected 'noreply'")
+    }
+  } else {
+    sc.noreply = false
+  }
+	return nil
+}
+
