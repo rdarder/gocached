@@ -67,8 +67,8 @@ type ErrCommand struct {
   os_err      os.Error
 }
 
-func NewSession(conn *net.TCPConn) (*Session, os.Error) {
-  var s = &Session{conn, bufio.NewReader(conn), newHashingStorage(1)}
+func NewSession(conn *net.TCPConn, store Storage) (*Session, os.Error) {
+  var s = &Session{conn, bufio.NewReader(conn), store}
   return s, nil
 }
 
@@ -241,10 +241,10 @@ func (sc *StorageCommand) parse(line []string) os.Error {
   sc.command = line[0]
   sc.key = line[1]
   sc.flags = uint32(flags)
-  if exptime < secondsInMonth {
-    sc.exptime = uint32(time.Seconds()) + uint32(exptime);
-  } else {
+  if exptime == 0 || exptime > secondsInMonth {
     sc.exptime = uint32(exptime)
+  } else {
+    sc.exptime = uint32(time.Seconds()) + uint32(exptime)
   }
   sc.bytes = uint32(bytes)
   sc.cas_unique = casuniq
