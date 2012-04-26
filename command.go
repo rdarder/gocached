@@ -6,24 +6,23 @@ import (
   "bufio"
   "strings"
   "strconv"
-  "regexp"
   "time"
   "fmt"
 )
 
-var spaceMatcher, _ = regexp.Compile("  *")
-
 type Session struct {
   conn      *net.TCPConn
   bufreader *bufio.Reader
-  storage Storage
+  storage CacheStorage
 }
 
 type Command interface {
-  Exec(s *Session) os.Error
+  parse(line []string) bool
+  Exec()
 }
 
 type StorageCommand struct {
+  session     *Session
   command     string
   key         string
   flags       uint32
@@ -35,295 +34,362 @@ type StorageCommand struct {
 }
 
 type RetrievalCommand struct {
-  command  string
+  session     *Session
+  command     string
   keys     []string
 }
 
 type DeleteCommand struct {
-  command string
+  session     *Session
+  command     string
   key string
   noreply bool
 }
 
 type TouchCommand struct {
-  command string
+  session     *Session
+  command     string
   key string
   exptime uint32
   noreply bool
 }
 
+type IncrCommand struct {
+  session *Session
+  incr    bool
+  key     string
+  value   uint64
+  noreply bool
+}
+
+type UnknownCommand struct {
+  session *Session
+  command string
+}
+
+type UninmplementedCommand struct {
+  session *Session
+  command string
+}
+
 const (
   NA = iota
-  UnkownCommand
+  InvalidCommand
   ClientError
   ServerError
 )
 
-const secondsInMonth = 60*60*24*30
-
-type ErrCommand struct {
-  errtype     int
-  errdesc     string
-  os_err      os.Error
-}
-
-func NewSession(conn *net.TCPConn) (*Session, os.Error) {
-  var s = &Session{conn, bufio.NewReader(conn), newHashingStorage(1)}
+func NewSession(conn *net.TCPConn, store CacheStorage) (*Session, os.Error) {
+  var s = &Session{conn, bufio.NewReader(conn), store}
   return s, nil
 }
 
-func (s *Session) NextCommand() Command {
-  var line []string
-  if rawline, _, err := s.bufreader.ReadLine(); err != nil {
-    return &ErrCommand{NA, "", err}
-  } else {
-    line = strings.Split(spaceMatcher.ReplaceAllString(string(rawline), " "), " ")
+
+/* Read a line and tokenize it */
+func getTokenizedLine(r *bufio.Reader) []string {
+  if rawline, _, err := r.ReadLine(); err == nil {
+    return strings.Fields(string(rawline))
   }
+  return nil
+}
 
-  switch line[0] {
-  case "set", "add", "replace", "append", "prepend", "cas":
-    command := new(StorageCommand)
-    if err := command.parse(line); err != nil {
-      return &ErrCommand{ClientError, "bad command line format", err}
-    } else if err := command.readData(s.bufreader); err != nil {
-      return &ErrCommand{ClientError, "bad data chunk", err}
-    }
-    return command
 
-  case "get", "gets":
-    command := new(RetrievalCommand)
-    if err := command.parse(line); err != nil {
-      return &ErrCommand{ClientError, "bad command line format", err}
+func (s *Session) CommandLoop() {
+
+  for line := getTokenizedLine(s.bufreader);
+      line != nil; line = getTokenizedLine(s.bufreader) {
+    var cmd Command = cmdSelect(line[0], s)
+    if cmd.parse(line) {
+      cmd.Exec()
     }
-    return command
-  case "delete":
-    command := new(DeleteCommand)
-    if err := command.parse(line); err != nil {
-      return &ErrCommand{ClientError, "bad command line format", err}
-    }
-    return command
-  case "incr", "decr":
-  case "touch":
-    command := new(TouchCommand)
-    if err := command.parse(line); err != nil {
-      return &ErrCommand{ClientError, "bad command line format", err}
-    }
-    return command
-  case "stats":
-  case "flush_all":
-  case "version":
-  case "quit":
   }
+}
 
-  return &ErrCommand{UnkownCommand, "",
-                     os.NewError("Unkown command: " + line[0])}
+func cmdSelect(name string, s *Session) Command {
+
+    switch name {
+
+    case "set", "add", "replace", "append", "prepend", "cas":
+      return &StorageCommand{session: s}
+    case "get", "gets":
+      return &RetrievalCommand{session: s}
+    case "delete":
+      return &DeleteCommand{session: s}
+    case "touch":
+      return &TouchCommand{session: s}
+    case "incr", "decr":
+      return &IncrCommand{session: s}
+    case "stats", "flush_all", "version", "quit":
+      return &UninmplementedCommand{session: s, command: name}
+    default:
+      return &UnknownCommand{session: s, command: name}
+    }
+  //not reaching here
+  return nil
 }
 
 ////////////////////////////// ERROR COMMANDS //////////////////////////////
 
-func (e *ErrCommand) Exec(s *Session) os.Error {
+/* a function to reply errors to client that always returns false */
+func Error(s *Session, errtype int, errdesc string) bool {
   var msg string
-  switch e.errtype {
-  case UnkownCommand: msg = "ERROR\r\n"
-  case ClientError: msg = "CLIENT_ERROR " + e.errdesc + "\r\n"
-  case ServerError: msg = "SERVER_ERROR " + e.errdesc + "\r\n"
+  switch errtype {
+  case InvalidCommand: msg = "ERROR\r\n"
+  case ClientError:   msg = "CLIENT_ERROR " + errdesc + "\r\n"
+  case ServerError:   msg = "SERVER_ERROR " + errdesc + "\r\n"
   }
-  if e.os_err != nil {
-    logger.Println(e.os_err)
-  }
-  if _, err := s.conn.Write([]byte(msg)); err != nil {
-    return err
-  }
-  return nil
+  s.conn.Write([]byte(msg))
+  return false
+}
+
+func (self *UnknownCommand) parse(line []string) bool{
+  return Error(self.session, InvalidCommand, "")
+}
+
+func (self *UnknownCommand) Exec() {
+}
+
+func (self *UninmplementedCommand) parse(line []string) bool {
+  return Error(self.session, ServerError, "Not Implemented")
+}
+
+func (self *UninmplementedCommand) Exec() {
 }
 
 ///////////////////////////// TOUCH COMMAND //////////////////////////////
 
-func (self *TouchCommand) parse(line []string) os.Error {
+const secondsInMonth = 60*60*24*30
+
+func (self *TouchCommand) parse(line []string) bool {
   var exptime uint64
   var err os.Error
   if len(line) < 3 {
-    return os.NewError("Bad touch command: missing parameters")
+    return Error(self.session, ClientError, "Bad touch command: missing parameters")
   } else if exptime, err = strconv.Atoui64(line[2]); err != nil {
-    return os.NewError("Bad touch command: bad expiration time")
+    return Error(self.session, ClientError, "Bad touch command: bad expiration time")
   }
-
   self.command = line[0]
   self.key = line[1]
-  if exptime < secondsInMonth {
-    self.exptime = uint32(time.Seconds()) + uint32(exptime);
-  } else {
+  if exptime == 0 || exptime > secondsInMonth {
     self.exptime = uint32(exptime)
+  } else {
+    self.exptime = uint32(time.Seconds()) + uint32(exptime);
   }
   if line[len(line)-1] == "noreply" {
     self.noreply = true
   }
-  return nil
+  return true
 }
 
-func (self *TouchCommand) Exec(s *Session) os.Error {
-  logger.Printf("Touch: command: %s, key: %s, , exptime %d, noreply: %t", self.command, self.key, self.exptime, self.noreply)
-  return nil
+func (self *TouchCommand) Exec() {
+  logger.Printf("Touch: command: %s, key: %s, , exptime %d, noreply: %t",
+                self.command, self.key, self.exptime, self.noreply)
 }
 
 ///////////////////////////// DELETE COMMAND ////////////////////////////
 
-func (sc *DeleteCommand) parse(line []string) os.Error {
+func (self *DeleteCommand) parse(line []string) bool {
   if len(line) < 2 {
-    return os.NewError("Bad delete command: missing parameters")
+    return Error(self.session, ClientError, "Bad delete command: missing parameters")
   }
-  sc.command = line[0]
-  sc.key = line[1]
+  self.command = line[0]
+  self.key = line[1]
   if line[len(line)-1] == "noreply" {
-    sc.noreply = true
+    self.noreply = true
   }
-  return nil
+  return true
 }
 
-func (self *DeleteCommand) Exec(s *Session) os.Error {
-  logger.Printf("Delete: command: %s, key: %s, noreply: %t", self.command, self.key, self.noreply)
-  if _, _,_,_,err := s.storage.Delete(self.key) ; err != nil && !self.noreply {
-    s.conn.Write([]byte("NOT_FOUND\r\n"))
-  } else if (err == nil && !self.noreply) {
-    s.conn.Write([]byte("DELETED\r\n"))
+func (self *DeleteCommand) Exec() {
+//  logger.Printf("Delete: command: %s, key: %s, noreply: %t",
+//                self.command, self.key, self.noreply)
+  var storage = self.session.storage
+  var conn = self.session.conn
+  if err, _ := storage.Delete(self.key) ; err != Ok && !self.noreply {
+    conn.Write([]byte("NOT_FOUND\r\n"))
+  } else if (err == Ok && !self.noreply) {
+    conn.Write([]byte("DELETED\r\n"))
   }
-  return nil
 }
 
 ///////////////////////////// RETRIEVAL COMMANDS ////////////////////////////
 
-func (sc *RetrievalCommand) parse(line []string) os.Error {
+func (self *RetrievalCommand) parse(line []string) bool {
   if len(line) < 2 {
-    return os.NewError("Bad retrieval command: missing parameters")
+    return Error(self.session, ClientError, "Bad retrieval command: missing parameters")
   }
-  sc.command = line[0]
-  sc.keys = line[1:]
-  return nil
+  self.command = line[0]
+  self.keys = line[1:]
+  return true
 }
 
-func (self *RetrievalCommand) Exec(s *Session) os.Error {
-
-  logger.Printf("Retrieval: command: %s, keys: %s", self.command, self.keys)
+func (self *RetrievalCommand) Exec() {
+//  logger.Printf("Retrieval: command: %s, keys: %s",
+//                self.command, self.keys)
+  var storage = self.session.storage
+  var conn = self.session.conn
   showAll := self.command == "gets"
   for i := 0; i < len(self.keys); i++ {
-    if flags, bytes, cas_unique, content, err := s.storage.Get(self.keys[i]); err == nil {
+    if err, entry := storage.Get(self.keys[i]); err == Ok {
       if showAll {
-        s.conn.Write([]byte(fmt.Sprintf("VALUE %s %d %d %d\r\n", self.keys[i], flags, bytes, cas_unique)))
+        conn.Write([]byte(fmt.Sprintf("VALUE %s %d %d %d\r\n", self.keys[i], entry.flags, entry.bytes, entry.cas_unique)))
       } else {
-        s.conn.Write([]byte(fmt.Sprintf("VALUE %s %d %d\r\n", self.keys[i], flags, bytes)))
+        conn.Write([]byte(fmt.Sprintf("VALUE %s %d %d\r\n", self.keys[i], entry.flags, entry.bytes)))
       }
-      s.conn.Write(content)
-      s.conn.Write([]byte("\r\n"))
+      conn.Write(entry.content)
+      conn.Write([]byte("\r\n"))
     }
   }
-  s.conn.Write([]byte("END\r\n"))
-  return nil
+  conn.Write([]byte("END\r\n"))
 }
 
 ///////////////////////////// STORAGE COMMANDS /////////////////////////////
 
-func (sc *StorageCommand) parse(line []string) os.Error {
+/* parse a storage command parameters and read the related data
+   returns a flag indicating sucesss */
+func (self *StorageCommand) parse(line []string) bool {
   var flags, exptime, bytes, casuniq uint64
   var err os.Error
   if len(line) < 5 {
-    return os.NewError("Bad storage command: missing parameters")
+    return Error(self.session, ClientError, "Bad storage command: missing parameters")
   } else if flags, err = strconv.Atoui64(line[2]); err != nil {
-    return os.NewError("Bad storage command: bad flags")
+    return Error(self.session, ClientError, "Bad storage command: bad flags")
   } else if exptime, err = strconv.Atoui64(line[3]); err != nil {
-    return os.NewError("Bad storage command: bad expiration time")
+    return Error(self.session, ClientError, "Bad storage command: bad expiration time")
   } else if bytes, err = strconv.Atoui64(line[4]); err != nil {
-    return os.NewError("Bad storage command: bad expiration time")
+    return Error(self.session, ClientError, "Bad storage command: bad byte-length")
   } else if line[0] == "cas" {
     if casuniq, err = strconv.Atoui64(line[5]); err != nil {
-      return os.NewError("Bad storage command: bad cas value")
+      return Error(self.session, ClientError, "Bad storage command: bad cas value")
     }
   }
-  sc.command = line[0]
-  sc.key = line[1]
-  sc.flags = uint32(flags)
-  if exptime < secondsInMonth {
-    sc.exptime = uint32(time.Seconds()) + uint32(exptime);
+  self.command = line[0]
+  self.key = line[1]
+  self.flags = uint32(flags)
+  if exptime == 0 || exptime > secondsInMonth {
+    self.exptime = uint32(exptime)
   } else {
-    sc.exptime = uint32(exptime)
+    self.exptime = uint32(time.Seconds()) + uint32(exptime);
   }
-  sc.bytes = uint32(bytes)
-  sc.cas_unique = casuniq
+  self.bytes = uint32(bytes)
+  self.cas_unique = casuniq
   if line[len(line)-1] == "noreply" {
-    sc.noreply = true
+    self.noreply = true
   }
-  return nil
+  return self.readData()
 }
 
-
-func (sc *StorageCommand) readData(rd *bufio.Reader) os.Error {
-  if sc.bytes <= 0 {
-    return os.NewError("Bad storage operation: trying to read 0 bytes")
+/* read the data for a storage command and return a flag indicating success */
+func (self *StorageCommand) readData() bool {
+  if self.bytes <= 0 {
+    return Error(self.session, ClientError, "Bad storage operation: trying to read 0 bytes")
   } else {
-    sc.data = make([]byte, sc.bytes + 2) // \r\n is always present at the end
+    self.data = make([]byte, self.bytes + 2) // \r\n is always present at the end
   }
+  var reader = self.session.bufreader
   // read all the data
-  for offset := 0; offset < int(sc.bytes); {
-    if nread, err := rd.Read(sc.data[offset:]); err != nil {
-      return err
+  for offset := 0; offset < int(self.bytes); {
+    if nread, err := reader.Read(self.data[offset:]); err != nil {
+      return Error(self.session, ServerError, "Failed to read data")
     } else {
       offset += nread
     }
   }
-  if string(sc.data[len(sc.data)-2:]) != "\r\n" {
-    return os.NewError("Bad storage operation: bad data chunk")
+  if string(self.data[len(self.data)-2:]) != "\r\n" {
+    return Error(self.session, ClientError, "Bad storage operation: bad data chunk")
   }
-  sc.data = sc.data[:len(sc.data)-2] // strip \n\r
-  return nil
+  self.data = self.data[:len(self.data)-2] // strip \n\r
+  return true
 }
 
-
-func (sc *StorageCommand) Exec(s *Session) os.Error {
-  logger.Printf("Storage: key: %s, flags: %d, exptime: %d, " +
+func (self *StorageCommand) Exec() {
+/*  logger.Printf("Storage: key: %s, flags: %d, exptime: %d, " +
                 "bytes: %d, cas: %d, noreply: %t, content: %s\n",
-                sc.key, sc.flags, sc.exptime, sc.bytes,
-                sc.cas_unique, sc.noreply, string(sc.data))
+                self.key, self.flags, self.exptime, self.bytes,
+                self.cas_unique, self.noreply, string(self.data))
+*/
+  var storage = self.session.storage
+  var conn = self.session.conn
 
-  switch(sc.command) {
+  switch self.command {
 
   case "set":
-    if err := s.storage.Set(sc.key, sc.flags, sc.exptime, sc.bytes, sc.data) ; err != nil {
-      // This is an internal error. Connection should be closed by the server.
-      s.conn.Close()
-    } else if !sc.noreply {
-      s.conn.Write([]byte("STORED\r\n"))
+    storage.Set(self.key, self.flags, self.exptime, self.bytes, self.data)
+    if !self.noreply {
+      conn.Write([]byte("STORED\r\n"))
     }
-    return nil
+    return
   case "add":
-    if err := s.storage.Add(sc.key, sc.flags, sc.exptime, sc.bytes, sc.data) ; err != nil && !sc.noreply {
-      s.conn.Write([]byte("NOT_STORED\r\n"))
-    } else if err == nil && !sc.noreply {
-      s.conn.Write([]byte("STORED\r\n"))
+    if err, _ := storage.Add(self.key, self.flags, self.exptime, self.bytes, self.data); err != Ok && !self.noreply {
+      conn.Write([]byte("NOT_STORED\r\n"))
+    } else if err == Ok && !self.noreply {
+      conn.Write([]byte("STORED\r\n"))
     }
   case "replace":
-    if err := s.storage.Replace(sc.key, sc.flags, sc.exptime, sc.bytes, sc.data) ; err != nil && !sc.noreply {
-      s.conn.Write([]byte("NOT_STORED\r\n"))
-    } else if err == nil && !sc.noreply {
-      s.conn.Write([]byte("STORED\r\n"))
+    if err, _, _ := storage.Replace(self.key, self.flags, self.exptime, self.bytes, self.data) ; err != Ok && !self.noreply {
+      conn.Write([]byte("NOT_STORED\r\n"))
+    } else if err == Ok && !self.noreply {
+      conn.Write([]byte("STORED\r\n"))
     }
   case "append":
-    if err := s.storage.Append(sc.key, sc.bytes, sc.data) ; err != nil && !sc.noreply {
-      s.conn.Write([]byte("NOT_STORED\r\n"))
-    } else if err == nil && !sc.noreply {
-      s.conn.Write([]byte("STORED\r\n"))
+    if err, _, _ := storage.Append(self.key, self.bytes, self.data) ; err != Ok && !self.noreply {
+      conn.Write([]byte("NOT_STORED\r\n"))
+    } else if err == Ok && !self.noreply {
+      conn.Write([]byte("STORED\r\n"))
     }
   case "prepend":
-    if err := s.storage.Prepend(sc.key, sc.bytes, sc.data) ; err != nil && !sc.noreply {
-      s.conn.Write([]byte("NOT_STORED\r\n"))
-    } else if err == nil && !sc.noreply {
-      s.conn.Write([]byte("STORED\r\n"))
+    if err, _, _ := storage.Prepend(self.key, self.bytes, self.data) ; err != Ok && !self.noreply {
+      conn.Write([]byte("NOT_STORED\r\n"))
+    } else if err == Ok && !self.noreply {
+      conn.Write([]byte("STORED\r\n"))
     }
   case "cas":
-    if err := s.storage.Cas(sc.key, sc.flags, sc.exptime, sc.bytes, sc.cas_unique, sc.data) ; err != nil && !sc.noreply {
-      //Fix this. We need special treatment for "exists" and "not found" errors.
-      s.conn.Write([]byte("EXISTS\r\n"))
-    } else if err == nil && !sc.noreply {
-      s.conn.Write([]byte("STORED\r\n"))
+    if err, prev, _ := storage.Cas(self.key, self.flags, self.exptime, self.bytes, self.cas_unique, self.data) ; err != Ok && !self.noreply {
+      if prev != nil {
+        conn.Write([]byte("EXISTS\r\n"))
+      } else {
+        conn.Write([]byte("NOT_STORED\r\n"))
+      }
+    } else if err == Ok && !self.noreply {
+      conn.Write([]byte("STORED\r\n"))
     }
   }
-  return nil
 }
+
+///////////////////////////// INCR/DECR COMMANDS /////////////////////////////
+
+func (self *IncrCommand) parse(line []string) bool {
+  var err os.Error
+  if len(line) < 3 {
+    return Error(self.session, ClientError, "Bad incr/decr command: missing parameters")
+  } else if self.value, err = strconv.Atoui64(line[2]); err != nil {
+    return Error(self.session, ClientError, "Bad incr/decr command: bad value")
+  }
+  self.incr = (line[0] == "incr")
+  self.key = line[1]
+
+  if len(line) == 4 && line[3] == "noreply" {
+    self.noreply = true
+  } else {
+    self.noreply = false
+  }
+  return true
+}
+
+func (self *IncrCommand) Exec() {
+  var storage = self.session.storage
+  var conn = self.session.conn
+  err, _, current := storage.Incr(self.key, self.value, self.incr)
+  if self.noreply { return }
+  if err == Ok {
+    conn.Write(current.content)
+    conn.Write([]byte("\r\n"))
+  } else if err == KeyNotFound {
+  //not reaching here
+    conn.Write([]byte("NOT_FOUND\r\n"))
+  } else if err == IllegalParameter {
+    conn.Write([]byte(fmt.Sprintf("CLIENT_ERROR cannot increment or decrement non-numeric value\r\n")))
+  }
+}
+
+
