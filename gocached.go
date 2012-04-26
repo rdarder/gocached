@@ -59,7 +59,6 @@ func main() {
 	} else {
 		// server loop
 		logger.Printf("Starting Gocached server")
-		/*for i := 0; i < 21; i++ {*/
 		for {
 			if conn, err := listener.AcceptTCP(); err != nil {
 				logger.Println("An error ocurred accepting a new connection")
